@@ -1,0 +1,781 @@
+/**
+ * ============================================================================
+ *  AutoSuVichar — पूरा Backend (FINAL)
+ *  Features: content + image + short-video + delivery-video generation,
+ *  approval-first posting (FB/IG/YouTube/WhatsApp), daily + festival auto-mode,
+ *  Login + multi-staff (roles), Settings/OAuth token connect, Lead capture + CRM,
+ *  Analytics, WhatsApp auto chat-bot, in-app notifications, logging, test mode.
+ *
+ *  चलाएँ:  npm install   फिर   node server.js   (Node 18+)
+ *  TEST_MODE=true (default) पर बिना किसी key के पूरा system चलता है।
+ *  Server पर चाहिए:  ffmpeg + fonts-noto-devanagari (deploy guide देखें)।
+ * ============================================================================
+ */
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const sharp = require("sharp");
+const cron = require("node-cron");
+const multer = require("multer");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { execFile } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const dns = require("dns");
+dns.setServers(["8.8.8.8", "1.1.1.1"]); // mobile/ISP DNS fix for MongoDB SRV
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const PORT = process.env.PORT || 5000;
+const TEST_MODE = process.env.TEST_MODE !== "false";
+const ENABLE_VIDEO = process.env.ENABLE_VIDEO !== "false";
+const ENABLE_CRON = process.env.ENABLE_CRON !== "false";
+const CRON_SCHEDULE = process.env.CRON_SCHEDULE || "0 9 * * *";
+const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/autosuvichar";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret-in-production";
+const WA_VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN || "autosuvichar-verify";
+const GRAPH = "https://graph.facebook.com/v21.0";
+
+const OUT_DIR = path.join(__dirname, "public", "generated");
+const MUSIC_DIR = path.join(__dirname, "music");
+const UPLOAD_DIR = path.join(__dirname, "uploads");
+const LOGO_DIR = path.join(__dirname, "public", "logos");
+const VEHICLE_DIR = path.join(__dirname, "public", "vehicles");
+const LOG_DIR = path.join(__dirname, "logs");
+[OUT_DIR, MUSIC_DIR, UPLOAD_DIR, LOGO_DIR, VEHICLE_DIR, LOG_DIR].forEach((d) => fs.mkdirSync(d, { recursive: true }));
+
+function log(level, msg, extra) {
+  const line = `[${new Date().toISOString()}] ${level} ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : "");
+  console[level === "ERROR" ? "error" : "log"](line);
+  try { fs.appendFileSync(path.join(LOG_DIR, "app.log"), line + "\n"); } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// Brands
+// ---------------------------------------------------------------------------
+const BRANDS = {
+  vp_honda: { name: "VP Honda", sub: "Honda मोटरसाइकिल / स्कूटर", accent: "#E4002B", accent2: "#7a0016",
+    phone: "9713394738", place: "VP Honda, परवलिया सड़क, भोपाल", products: ["Honda Shine", "SP 125", "Activa 6G", "Dio", "Unicorn"],
+    logo: "vp_honda.png", handles: { fb: "VPHondaBhopal", ig: "vp_honda", yt: "VP Honda" } },
+  yakuza: { name: "Yakuza EV", sub: "MD Automobiles · इलेक्ट्रिक स्कूटी", accent: "#0EA36A", accent2: "#075c3c",
+    phone: "9713394738", place: "MD Automobiles, भोपाल", products: ["Yakuza Pro", "Yakuza Lite", "Yakuza Max"],
+    logo: "yakuza.png", handles: { fb: "YakuzaEV", ig: "yakuza_ev", yt: "Yakuza EV" } },
+  minimetro: { name: "Mini Metro", sub: "MD Automobiles · ऑटो रिक्शा", accent: "#1565C0", accent2: "#0d3c70",
+    phone: "9713394738", place: "MD Automobiles, भोपाल", products: ["Mini Metro Passenger", "Mini Metro Cargo"],
+    logo: "minimetro.png", handles: { fb: "MiniMetroAuto", ig: "mini_metro_auto", yt: "Mini Metro" } },
+};
+const TYPES = ["suvichar", "vigyapan", "festival", "suchna", "gift"];
+const TYPE_LABEL = { suvichar: "सुविचार", vigyapan: "विज्ञापन", festival: "त्यौहार शुभकामना", suchna: "आवश्यक सूचना", gift: "गिफ्ट प्रचार" };
+
+// त्यौहार auto-mode — ⚠️ ये dates सैंपल हैं, हर साल verify/update करें (panchang अनुसार)
+const FESTIVALS = [
+  { date: "2026-01-14", name: "मकर संक्रांति" },
+  { date: "2026-01-26", name: "गणतंत्र दिवस" },
+  { date: "2026-03-04", name: "होली" },
+  { date: "2026-08-15", name: "स्वतंत्रता दिवस" },
+  { date: "2026-08-26", name: "रक्षाबंधन" },
+  { date: "2026-10-20", name: "दशहरा" },
+  { date: "2026-11-08", name: "दिवाली" },
+];
+
+// ---------------------------------------------------------------------------
+// Models (OverwriteModelError guard)
+// ---------------------------------------------------------------------------
+const model = (name, schema) => mongoose.models[name] || mongoose.model(name, schema);
+
+const Content = model("Content", new mongoose.Schema({
+  brand: { type: String, required: true }, type: { type: String, required: true }, text: { type: String, required: true },
+  status: { type: String, enum: ["pending", "rejected", "sent", "failed"], default: "pending" },
+  post_type: { type: String, enum: ["photo", "video"], default: "photo" },
+  platforms: { fb: { type: Boolean, default: true }, ig: { type: Boolean, default: true }, yt: { type: Boolean, default: true }, wa: { type: Boolean, default: true } },
+  images: { square: String, story: String, landscape: String }, video: String, music_used: String,
+  promo: { model: String, price: String, downPayment: String, cashback: String, features: [String], photo: String },
+  channels: [String], results: mongoose.Schema.Types.Mixed, sentAt: Date, error: String,
+}, { timestamps: true }));
+
+const Delivery = model("Delivery", new mongoose.Schema({
+  brand: { type: String, required: true }, customerName: String, bikeName: String, offer: String, photo: String, text: String,
+  images: { square: String, landscape: String }, video: String, music_used: String, post_type: { type: String, default: "video" },
+  platforms: { fb: { type: Boolean, default: true }, ig: { type: Boolean, default: true }, yt: { type: Boolean, default: true }, wa: { type: Boolean, default: true } },
+  status: { type: String, enum: ["pending", "rejected", "sent", "failed"], default: "pending" },
+  channels: [String], results: mongoose.Schema.Types.Mixed, engagement_stats: mongoose.Schema.Types.Mixed, sentAt: Date,
+}, { timestamps: true }));
+
+const User = model("User", new mongoose.Schema({
+  name: String, email: { type: String, unique: true, required: true }, passwordHash: String,
+  role: { type: String, enum: ["super-admin", "admin", "manager", "salesman"], default: "salesman" }, brand: String,
+}, { timestamps: true }));
+
+const Setting = model("Setting", new mongoose.Schema({
+  brand: { type: String, unique: true }, creds: mongoose.Schema.Types.Mixed,
+}, { timestamps: true }));
+
+const Lead = model("Lead", new mongoose.Schema({
+  brand: String, name: String, mobile: String, vehicleInterest: String, source: { type: String, default: "post" },
+  status: { type: String, enum: ["new", "contacted", "won", "lost"], default: "new" }, note: String,
+}, { timestamps: true }));
+
+const Notification = model("Notification", new mongoose.Schema({
+  type: String, message: String, brand: String, read: { type: Boolean, default: false },
+}, { timestamps: true }));
+
+async function notify(type, message, brand) {
+  try { await Notification.create({ type, message, brand }); log("INFO", "notify", { type, brand }); } catch (e) {}
+}
+
+// per-brand credentials: DB settings पहले, फिर .env
+let SETTINGS_CACHE = {};
+async function loadSettings() {
+  SETTINGS_CACHE = {};
+  (await Setting.find()).forEach((s) => (SETTINGS_CACHE[s.brand] = s.creds || {}));
+}
+function brandCreds(id) {
+  const P = id.toUpperCase();
+  const db = SETTINGS_CACHE[id] || {};
+  const recRaw = db.waRecipients != null ? db.waRecipients : process.env[`${P}_WA_RECIPIENTS`] || "";
+  const recipients = Array.isArray(recRaw) ? recRaw : String(recRaw).split(",").map((s) => s.trim()).filter(Boolean);
+  return {
+    fbPageId: db.fbPageId || process.env[`${P}_FB_PAGE_ID`],
+    fbToken: db.fbToken || process.env[`${P}_FB_TOKEN`],
+    igUserId: db.igUserId || process.env[`${P}_IG_USER_ID`],
+    ytRefreshToken: db.ytRefreshToken || process.env[`${P}_YT_REFRESH_TOKEN`],
+    waPhoneId: db.waPhoneId || process.env[`${P}_WA_PHONE_ID`],
+    waRecipients: recipients,
+  };
+}
+
+// ===========================================================================
+// CONTENT + IMAGE GENERATION
+// ===========================================================================
+function templateContent(brandId, type, festivalName) {
+  const b = BRANDS[brandId];
+  const prod = b.products[Math.floor(Math.random() * b.products.length)];
+  const bank = {
+    suvichar: ["संकल्प से ही मंज़िल मिलती है — आज का सफर शुभ हो।", "हर सुबह एक नई शुरुआत है, बस पहला कदम बढ़ाइए।", "मेहनत का रास्ता लंबा है, पर मंज़िल उतनी ही सुंदर।"],
+    vigyapan: [`${prod} अब ${b.place} पर उपलब्ध!\nआसान EMI, शानदार माइलेज। 📞 ${b.phone}`, `${prod} की सवारी, हर सफर शानदार।\nबेहतरीन कीमत पर — ${b.place}।`],
+    festival: [`${b.name} परिवार की ओर से ${festivalName || "त्यौहार"} की हार्दिक शुभकामनाएं! 🪔\nआपका हर सफर सुरक्षित और खुशहाल हो।`],
+    suchna: [`आवश्यक सूचना: इस रविवार ${b.place} खुला रहेगा।\nफ्री सर्विस कैंप — सुबह 10 से शाम 6। 📞 ${b.phone}`],
+    gift: [`🎁 ${prod} पर फ्री हेलमेट + ₹5000 तक डिस्काउंट!\nसीमित समय का ऑफर — 📞 ${b.phone}`],
+  };
+  const arr = bank[type] || bank.suvichar;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+async function generateText(brandId, type, festivalName) {
+  if (TEST_MODE || !OPENAI_API_KEY) return templateContent(brandId, type, festivalName);
+  const b = BRANDS[brandId];
+  const extra = festivalName ? ` त्यौहार: ${festivalName}.` : "";
+  const prompt = `तुम भारतीय ऑटोमोबाइल डीलर "${b.name}" (${b.sub}) के लिए सोशल मीडिया लिखते हो।\n` +
+    `उत्पाद: ${b.products.join(", ")}. फ़ोन: ${b.phone}. जगह: ${b.place}.${extra}\n` +
+    `छोटा हिंदी पोस्ट बनाओ: "${TYPE_LABEL[type]}". नियम: 2-4 लाइन, आकर्षक, सही जगह emoji, hashtag नहीं, भूमिका नहीं — सिर्फ़ text।`;
+  try {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({ model: OPENAI_MODEL, messages: [{ role: "user", content: prompt }], max_tokens: 200, temperature: 0.9 }),
+    });
+    if (!res.ok) throw new Error(`OpenAI ${res.status}`);
+    const t = (await res.json())?.choices?.[0]?.message?.content?.trim();
+    if (!t) throw new Error("empty");
+    return t;
+  } catch (e) { log("ERROR", "OpenAI → template", { msg: e.message }); return templateContent(brandId, type, festivalName); }
+}
+function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function wrapLines(text, maxChars) {
+  const out = [];
+  for (const raw of String(text).split("\n")) {
+    let line = "";
+    for (const word of raw.split(/\s+/)) {
+      if ((line + " " + word).trim().length > maxChars) { if (line) out.push(line.trim()); line = word; }
+      else line = (line + " " + word).trim();
+    }
+    out.push(line.trim());
+  }
+  return out.filter((l) => l.length > 0);
+}
+function buildSVG(brandId, text, w, h, type) {
+  const b = BRANDS[brandId];
+  const festive = type === "festival" || type === "gift";
+  const gold = "#ffd400";
+  const fontSize = Math.round(w / 16);
+  const maxChars = Math.max(12, Math.floor((w * 0.82) / (fontSize * 0.6)));
+  const lines = wrapLines(text, maxChars);
+  const lineGap = Math.round(fontSize * 1.32);
+  const startY = h * 0.52 - (lines.length * lineGap) / 2 + fontSize;
+  const tspans = lines.map((l, i) => `<text x="50%" y="${startY + i * lineGap}" text-anchor="middle" font-family="Noto Sans Devanagari, Mukta, sans-serif" font-size="${fontSize}" font-weight="700" fill="#fff">${esc(l)}</text>`).join("");
+  // festival/gift पर हल्के सजावटी गोले
+  const decor = festive
+    ? `<circle cx="${w * 0.12}" cy="${h * 0.3}" r="${w * 0.012}" fill="${gold}" fill-opacity="0.8"/>
+       <circle cx="${w * 0.88}" cy="${h * 0.32}" r="${w * 0.016}" fill="${gold}" fill-opacity="0.7"/>
+       <circle cx="${w * 0.2}" cy="${h * 0.7}" r="${w * 0.01}" fill="${gold}" fill-opacity="0.6"/>
+       <circle cx="${w * 0.82}" cy="${h * 0.68}" r="${w * 0.013}" fill="${gold}" fill-opacity="0.7"/>` : "";
+  return Buffer.from(`<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
+    <defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${b.accent}"/><stop offset="100%" stop-color="${b.accent2}"/></linearGradient></defs>
+    <rect width="${w}" height="${h}" fill="url(#bg)"/>
+    ${decor}
+    <!-- top brand bar -->
+    <rect x="0" y="0" width="${w}" height="${h * 0.11}" fill="#000" fill-opacity="0.25"/>
+    <text x="${w * 0.97}" y="${h * 0.072}" text-anchor="end" font-family="Noto Sans Devanagari, Mukta, sans-serif" font-size="${Math.round(w / 22)}" font-weight="700" fill="#fff">${esc(b.name)}</text>
+    <rect x="${w * 0.5 - w * 0.06}" y="${h * 0.16}" width="${w * 0.12}" height="6" rx="3" fill="${festive ? gold : "#fff"}"/>
+    ${tspans}
+    <!-- footer bar -->
+    <rect x="0" y="${h * 0.88}" width="${w}" height="${h * 0.12}" fill="#000" fill-opacity="0.45"/>
+    <text x="50%" y="${h * 0.945}" text-anchor="middle" font-family="Noto Sans Devanagari, Mukta, sans-serif" font-size="${Math.round(w / 28)}" font-weight="700" fill="#fff">📞 ${esc(b.phone)}  •  ${esc(b.place)}</text>
+    <text x="${w * 0.95}" y="${h * 0.855}" text-anchor="end" font-family="Mukta, sans-serif" font-size="${Math.round(w / 55)}" fill="#ffd54f" fill-opacity="0.9">AI Generated</text></svg>`);
+}
+async function loadLogo(brandId, size) {
+  const b = BRANDS[brandId];
+  if (!b.logo) return null;
+  try {
+    return await sharp(path.join(LOGO_DIR, b.logo)).resize(size, size, { fit: "inside" }).png().toBuffer();
+  } catch (_) { return null; } // logo file न हो तो चुपचाप skip
+}
+async function generateImages(brandId, id, text, type) {
+  const sizes = { square: [1080, 1080], story: [1080, 1920], landscape: [1200, 630] };
+  const out = {};
+  for (const [k, [w, h]] of Object.entries(sizes)) {
+    const f = `${id}_${k}.png`;
+    let base = await sharp(buildSVG(brandId, text, w, h, type)).png().toBuffer();
+    const logo = await loadLogo(brandId, Math.round(w * 0.18));
+    if (logo) base = await sharp(base).composite([{ input: logo, top: Math.round(h * 0.025), left: Math.round(w * 0.04) }]).png().toBuffer();
+    await sharp(base).toFile(path.join(OUT_DIR, f));
+    out[k] = `${PUBLIC_URL}/generated/${f}`;
+  }
+  return out;
+}
+
+// ----- PROMO: गाड़ी वाला आकर्षक विज्ञापन poster (Honda-ad style) -----
+// background options (o.bg): "light" | "brand" | "dark"   (default light)
+const PROMO_BG = ["light", "brand", "dark"];
+function promoPalette(brandId, bg) {
+  const b = BRANDS[brandId];
+  if (bg === "brand") return { kind: "grad", textDark: "#fff", sub: b.accent === "#E4002B" ? "#ffd400" : "#ffd400", footMuted: "#f0f0f0" };
+  if (bg === "dark") return { kind: "dark", textDark: "#fff", sub: "#ffd400", footMuted: "#bbb" };
+  return { kind: "light", textDark: "#1a1a1a", sub: b.accent, footMuted: "#555" }; // light (default)
+}
+function buildPromoSVG(brandId, o, w, h) {
+  const b = BRANDS[brandId];
+  const bg = PROMO_BG.includes(o.bg) ? o.bg : "light";
+  const p = promoPalette(brandId, bg);
+  const feats = (o.features || []).slice(0, 3);
+  const featSVG = feats.map((f, i, a) =>
+    `<text x="${w * (0.5 / a.length + i / a.length)}" y="${h * 0.838}" text-anchor="middle" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 42)}" font-weight="700" fill="#fff">${esc(f)}</text>`
+  ).join("");
+  // background fill
+  let bgRect;
+  if (p.kind === "grad") bgRect = `<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${b.accent}"/><stop offset="100%" stop-color="${b.accent2}"/></linearGradient></defs><rect width="${w}" height="${h}" fill="url(#bg)"/>`;
+  else if (p.kind === "dark") bgRect = `<rect width="${w}" height="${h}" fill="#141414"/>`;
+  else bgRect = `<defs><pattern id="diag" width="40" height="40" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="40" height="40" fill="#f2f2f2"/><line x1="0" y1="0" x2="0" y2="40" stroke="#e7e7e7" stroke-width="6"/></pattern></defs><rect width="${w}" height="${h}" fill="url(#diag)"/>`;
+  return Buffer.from(`<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
+  ${bgRect}
+  <rect x="0" y="0" width="${w}" height="${h * 0.013}" fill="${b.accent}"/>
+  <text x="${w * 0.06}" y="${h * 0.12}" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 14)}" font-weight="800" fill="${p.textDark}">${esc(o.model || "")}</text>
+  <text x="${w * 0.97}" y="${h * 0.06}" text-anchor="end" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 26)}" font-weight="700" fill="${p.textDark}">${esc(b.name)}</text>
+  <!-- price slanted ribbon -->
+  <g transform="rotate(-4 ${w * 0.26} ${h * 0.69})">
+    <rect x="${w * 0.05}" y="${h * 0.635}" width="${w * 0.40}" height="${h * 0.045}" fill="${b.accent}"/>
+    <text x="${w * 0.07}" y="${h * 0.667}" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 40)}" font-weight="700" fill="#fff">एक्स-शोरूम</text>
+    <rect x="${w * 0.05}" y="${h * 0.682}" width="${w * 0.40}" height="${h * 0.078}" fill="#141414"/>
+    <text x="${w * 0.07}" y="${h * 0.742}" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 13)}" font-weight="800" fill="#fff">₹${esc(o.price || "")}</text>
+  </g>
+  <!-- offers -->
+  <text x="${w * 0.53}" y="${h * 0.628}" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 34)}" font-weight="800" fill="${p.textDark}">लिमिटेड पीरियड ऑफर</text>
+  ${o.downPayment ? `<rect x="${w * 0.53}" y="${h * 0.645}" width="${w * 0.42}" height="${h * 0.05}" rx="6" fill="#ffd400"/><text x="${w * 0.55}" y="${h * 0.679}" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 42)}" font-weight="700" fill="#111">डाउन पेमेंट</text><text x="${w * 0.93}" y="${h * 0.681}" text-anchor="end" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 26)}" font-weight="800" fill="${b.accent}">₹${esc(o.downPayment)}</text>` : ""}
+  ${o.cashback ? `<rect x="${w * 0.53}" y="${h * 0.702}" width="${w * 0.42}" height="${h * 0.05}" rx="6" fill="${b.accent}"/><text x="${w * 0.55}" y="${h * 0.736}" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 42)}" font-weight="700" fill="#fff">कैशबैक</text><text x="${w * 0.93}" y="${h * 0.738}" text-anchor="end" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 26)}" font-weight="800" fill="#fff">₹${esc(o.cashback)}</text>` : ""}
+  <!-- feature strip -->
+  <rect x="0" y="${h * 0.80}" width="${w}" height="${h * 0.06}" fill="${b.accent}"/>
+  ${featSVG}
+  <!-- footer -->
+  <text x="${w * 0.5}" y="${h * 0.93}" text-anchor="middle" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 34)}" font-weight="700" fill="${p.textDark}">📞 ${esc(b.phone)}</text>
+  <text x="${w * 0.5}" y="${h * 0.965}" text-anchor="middle" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${Math.round(w / 42)}" fill="${p.footMuted}">${esc(b.place)}</text>
+  <text x="${w * 0.96}" y="${h * 0.05}" text-anchor="end" font-family="Mukta,sans-serif" font-size="${Math.round(w / 60)}" fill="#999">AI Generated</text>
+  </svg>`);
+}
+async function generatePromoImages(brandId, id, o, photoPath) {
+  const sizes = { square: [1080, 1080], story: [1080, 1920] };
+  const out = {};
+  for (const [k, [w, h]] of Object.entries(sizes)) {
+    let frame = await sharp(buildPromoSVG(brandId, o, w, h)).png().toBuffer();
+    // गाड़ी की फोटो — background पर सीधे (transparent PNG सबसे अच्छा)
+    let veh = null;
+    try { veh = await sharp(photoPath).resize(Math.round(w * 0.64), Math.round(h * 0.40), { fit: "inside" }).png().toBuffer(); } catch (_) {}
+    if (veh) {
+      const meta = await sharp(veh).metadata();
+      frame = await sharp(frame).composite([{ input: veh, top: Math.round(h * 0.20), left: Math.round((w - (meta.width || w * 0.64)) / 2) }]).png().toBuffer();
+    }
+    const logo = await loadLogo(brandId, Math.round(w * 0.12));
+    if (logo) frame = await sharp(frame).composite([{ input: logo, top: Math.round(h * 0.02), left: Math.round(w * 0.04) }]).png().toBuffer();
+    const f = `${id}_${k}.png`;
+    await sharp(frame).toFile(path.join(OUT_DIR, f));
+    out[k] = `${PUBLIC_URL}/generated/${f}`;
+  }
+  const fL = `${id}_landscape.png`;
+  await sharp(path.join(OUT_DIR, `${id}_square.png`)).resize(1200, 630, { fit: "contain", background: { r: 242, g: 242, b: 242 } }).png().toFile(path.join(OUT_DIR, fL));
+  out.landscape = `${PUBLIC_URL}/generated/${fL}`;
+  return out;
+}
+// VIDEO (content quote → 9:16) + DELIVERY (multi-slide)
+// ===========================================================================
+function ffmpegOk() { return new Promise((r) => execFile("ffmpeg", ["-version"], (e) => r(!e))); }
+async function generateVideo(id, musicFile) {
+  if (!ENABLE_VIDEO) throw new Error("video disabled");
+  if (!(await ffmpegOk())) throw new Error("ffmpeg not installed");
+  const img = path.join(OUT_DIR, `${id}_story.png`);
+  if (!fs.existsSync(img)) throw new Error("story image missing");
+  const out = path.join(OUT_DIR, `${id}_video.mp4`);
+  const vf = "scale=1080:1920,zoompan=z='min(zoom+0.0012,1.15)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=25,fade=in:0:20,fade=out:355:20";
+  const args = ["-y", "-loop", "1", "-i", img];
+  if (musicFile) args.push("-i", musicFile);
+  args.push("-t", "15", "-r", "25", "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p");
+  if (musicFile) args.push("-c:a", "aac", "-shortest");
+  args.push(out);
+  await new Promise((res, rej) => execFile("ffmpeg", args, (e, _o, se) => (e ? rej(new Error("ffmpeg: " + (se || e.message).slice(0, 200))) : res())));
+  return `${PUBLIC_URL}/generated/${id}_video.mp4`;
+}
+function delivSlideSVG(brandId, inner) {
+  const b = BRANDS[brandId];
+  return Buffer.from(`<svg width="1080" height="1920" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${b.accent}"/><stop offset="100%" stop-color="${b.accent2}"/></linearGradient></defs><rect width="1080" height="1920" fill="url(#g)"/>${inner}<rect x="740" y="30" width="310" height="58" fill="#000" fill-opacity="0.55" rx="10"/><text x="895" y="70" text-anchor="middle" font-family="Mukta,sans-serif" font-size="30" fill="#ffd54f">AI Generated</text></svg>`);
+}
+function dtext(x, y, s, t, w = "700") { return `<text x="${x}" y="${y}" text-anchor="middle" font-family="Noto Sans Devanagari,Mukta,sans-serif" font-size="${s}" font-weight="${w}" fill="#fff">${esc(t)}</text>`; }
+async function buildDeliverySlides(brandId, id, d, photoPath) {
+  const b = BRANDS[brandId];
+  const bigLogo = await loadLogo(brandId, 360);
+  // 1) intro — बड़ा logo + New Delivery
+  let s1 = await sharp(delivSlideSVG(brandId, dtext(540, 1180, 84, "New Delivery 🎉"))).png().toBuffer();
+  if (bigLogo) s1 = await sharp(s1).composite([{ input: bigLogo, top: 620, left: 360 }]).png().toBuffer();
+  await sharp(s1).toFile(path.join(OUT_DIR, `${id}_s1.png`));
+  // 2) main — customer photo + congrats
+  const base = sharp(delivSlideSVG(brandId, dtext(540, 300, 64, "Congratulations") + dtext(540, 390, 76, d.customerName || "") + dtext(540, 1640, 56, d.bikeName || "")));
+  let photoBuf;
+  try { photoBuf = await sharp(photoPath).resize(800, 800, { fit: "cover" }).png().toBuffer(); }
+  catch (_) { photoBuf = await sharp({ create: { width: 800, height: 800, channels: 3, background: "#222" } }).png().toBuffer(); }
+  const smallLogo = await loadLogo(brandId, 150);
+  const mainParts = [{ input: photoBuf, top: 520, left: 140 }];
+  if (smallLogo) mainParts.push({ input: smallLogo, top: 40, left: 40 });
+  await base.composite(mainParts).png().toFile(path.join(OUT_DIR, `${id}_s2.png`));
+  await sharp(path.join(OUT_DIR, `${id}_s2.png`)).resize(1080, 1080, { fit: "cover", position: "top" }).png().toFile(path.join(OUT_DIR, `${id}_square.png`));
+  await sharp(path.join(OUT_DIR, `${id}_s2.png`)).resize(1200, 630, { fit: "cover" }).png().toFile(path.join(OUT_DIR, `${id}_landscape.png`));
+  // 3) offer
+  await sharp(delivSlideSVG(brandId, dtext(540, 900, 80, d.offer || "विशेष ऑफर 🎁") + dtext(540, 1020, 60, "सीमित समय के लिए"))).png().toFile(path.join(OUT_DIR, `${id}_s3.png`));
+  // 4) outro — logo + call now
+  let s4 = await sharp(delivSlideSVG(brandId, dtext(540, 1180, 68, "📞 Call Now") + dtext(540, 1290, 88, b.phone) + dtext(540, 1410, 48, b.place))).png().toBuffer();
+  if (bigLogo) s4 = await sharp(s4).composite([{ input: bigLogo, top: 560, left: 360 }]).png().toBuffer();
+  await sharp(s4).toFile(path.join(OUT_DIR, `${id}_s4.png`));
+}
+function clipFromImage(img, dur, out) {
+  const fo = dur * 25 - 12;
+  return new Promise((res, rej) => execFile("ffmpeg", ["-y", "-loop", "1", "-i", img, "-t", String(dur), "-r", "25", "-vf", `scale=1080:1920,fade=in:0:12,fade=out:${fo}:12`, "-c:v", "libx264", "-pix_fmt", "yuv420p", out], (e, _o, se) => (e ? rej(new Error("clip: " + (se || e.message).slice(0, 150))) : res())));
+}
+async function generateDeliveryVideo(id, musicFile) {
+  if (!ENABLE_VIDEO) throw new Error("video disabled");
+  if (!(await ffmpegOk())) throw new Error("ffmpeg not installed");
+  const durs = [2, 5, 3, 3], clips = [];
+  for (let i = 0; i < 4; i++) { const o = path.join(OUT_DIR, `${id}_c${i}.mp4`); await clipFromImage(path.join(OUT_DIR, `${id}_s${i + 1}.png`), durs[i], o); clips.push(o); }
+  const listFile = path.join(OUT_DIR, `${id}_list.txt`);
+  fs.writeFileSync(listFile, clips.map((c) => `file '${c}'`).join("\n"));
+  const out = path.join(OUT_DIR, `${id}_video.mp4`);
+  const args = ["-y", "-f", "concat", "-safe", "0", "-i", listFile];
+  if (musicFile) args.push("-i", musicFile);
+  args.push("-c:v", "libx264", "-pix_fmt", "yuv420p");
+  if (musicFile) args.push("-c:a", "aac", "-shortest");
+  args.push(out);
+  await new Promise((res, rej) => execFile("ffmpeg", args, (e, _o, se) => (e ? rej(new Error("concat: " + (se || e.message).slice(0, 150))) : res())));
+  clips.forEach((c) => { try { fs.unlinkSync(c); } catch (_) {} });
+  try { fs.unlinkSync(listFile); } catch (_) {}
+  return `${PUBLIC_URL}/generated/${id}_video.mp4`;
+}
+async function deliveryCaption(brandId, d) {
+  const b = BRANDS[brandId];
+  return `🎉 नई शुरुआत, नया सफर!\n\n${d.customerName || "ग्राहक"} जी को ${d.bikeName || "नई गाड़ी"} की हार्दिक बधाई 🚀\nआपका हर सफर सुरक्षित और शानदार हो!\n\n📍 ${b.place}\n📞 ${b.phone}`;
+}
+
+// ===========================================================================
+// PUBLISHERS
+// ===========================================================================
+async function postFacebook(c, item) {
+  if (!c.fbPageId || !c.fbToken) throw new Error("FB creds missing");
+  const r = await fetch(`${GRAPH}/${c.fbPageId}/photos`, { method: "POST", body: new URLSearchParams({ url: item.images.landscape, caption: item.text, access_token: c.fbToken }) });
+  const d = await r.json(); if (d.error) throw new Error("FB: " + d.error.message); return d.post_id || d.id;
+}
+async function postInstagram(c, item) {
+  if (!c.igUserId || !c.fbToken) throw new Error("IG creds missing");
+  const cr = await (await fetch(`${GRAPH}/${c.igUserId}/media`, { method: "POST", body: new URLSearchParams({ image_url: item.images.square, caption: item.text, access_token: c.fbToken }) })).json();
+  if (cr.error) throw new Error("IG container: " + cr.error.message);
+  const pub = await (await fetch(`${GRAPH}/${c.igUserId}/media_publish`, { method: "POST", body: new URLSearchParams({ creation_id: cr.id, access_token: c.fbToken }) })).json();
+  if (pub.error) throw new Error("IG publish: " + pub.error.message); return pub.id;
+}
+async function uploadYouTube(c, item) {
+  if (!item.video) throw new Error("कोई video नहीं — पहले video बनाएँ");
+  if (!c.ytRefreshToken) throw new Error("YT token missing");
+  const { google } = require("googleapis");
+  const oauth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, `${PUBLIC_URL}/api/oauth/google/callback`);
+  oauth.setCredentials({ refresh_token: c.ytRefreshToken });
+  const yt = google.youtube({ version: "v3", auth: oauth });
+  const res = await yt.videos.insert({
+    part: ["snippet", "status"],
+    requestBody: { snippet: { title: (item.text.split("\n")[0] || "Post").slice(0, 90) + " #Shorts", description: item.text + "\n\n(AI Generated)", categoryId: "2" }, status: { privacyStatus: "public", selfDeclaredMadeForKids: false } },
+    media: { body: fs.createReadStream(path.join(OUT_DIR, `${item._id}_video.mp4`)) },
+  });
+  return res.data.id;
+}
+async function sendWhatsApp(c, item) {
+  if (!c.waPhoneId || !process.env.WA_TOKEN) throw new Error("WA creds missing");
+  if (!c.waRecipients.length) throw new Error("कोई WA recipient नहीं");
+  const out = [];
+  for (const to of c.waRecipients) {
+    const r = await fetch(`${GRAPH}/${c.waPhoneId}/messages`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.WA_TOKEN}` }, body: JSON.stringify({ messaging_product: "whatsapp", to, type: "image", image: { link: item.images.square, caption: item.text } }) });
+    out.push(await r.json());
+  }
+  return out;
+}
+async function publish(item) {
+  const c = brandCreds(item.brand);
+  const chosen = Object.entries(item.platforms).filter(([, on]) => on).map(([k]) => k);
+  const results = [];
+  for (const ch of chosen) {
+    try {
+      if (TEST_MODE) { log("INFO", `[TEST] would post → ${ch}`, { brand: item.brand }); results.push({ platform: ch, ok: true, test: true }); continue; }
+      let id;
+      if (ch === "fb") id = await postFacebook(c, item);
+      else if (ch === "ig") id = await postInstagram(c, item);
+      else if (ch === "yt") id = await uploadYouTube(c, item);
+      else if (ch === "wa") { await sendWhatsApp(c, item); id = "sent"; }
+      results.push({ platform: ch, ok: true, id });
+    } catch (e) { log("ERROR", `publish ${ch} failed`, { msg: e.message }); results.push({ platform: ch, ok: false, error: e.message }); }
+  }
+  return results;
+}
+
+// ===========================================================================
+// Express + Auth
+// ===========================================================================
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use("/generated", express.static(OUT_DIR));
+
+function sign(u) { return jwt.sign({ id: String(u._id), role: u.role, name: u.name }, JWT_SECRET, { expiresIn: "7d" }); }
+
+// Public paths (बाक़ी सब login-protected)
+const PUBLIC = [/^\/generated\//, /^\/api\/health$/, /^\/api\/auth\/login$/, /^\/api\/lead$/, /^\/api\/whatsapp\/webhook$/, /^\/api\/oauth\/google\/callback$/];
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return next();
+  if (PUBLIC.some((rx) => rx.test(req.path)) || !req.path.startsWith("/api/")) return next();
+  try { req.user = jwt.verify((req.headers.authorization || "").replace("Bearer ", ""), JWT_SECRET); next(); }
+  catch (e) { res.status(401).json({ error: "unauthorized — login करें" }); }
+});
+const requireRole = (...roles) => (req, res, next) => roles.includes(req.user.role) ? next() : res.status(403).json({ error: "इस काम की अनुमति नहीं" });
+
+app.get("/api/health", (req, res) => res.json({ ok: true, version: "v5-promo-bg", testMode: TEST_MODE, video: ENABLE_VIDEO, cron: ENABLE_CRON ? CRON_SCHEDULE : false, brands: Object.keys(BRANDS) }));
+
+// ---- Auth ----
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const u = await User.findOne({ email: (req.body.email || "").toLowerCase() });
+    if (!u || !(await bcrypt.compare(req.body.password || "", u.passwordHash))) return res.status(401).json({ error: "ग़लत email/password" });
+    res.json({ token: sign(u), user: { name: u.name, email: u.email, role: u.role, brand: u.brand } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get("/api/auth/me", (req, res) => res.json(req.user));
+app.post("/api/auth/register", requireRole("super-admin", "admin"), async (req, res) => {
+  try {
+    const { name, email, password, role, brand } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "email व password चाहिए" });
+    const passwordHash = await bcrypt.hash(password, 10);
+    const u = await User.create({ name, email: email.toLowerCase(), passwordHash, role: role || "salesman", brand });
+    res.json({ id: u._id, email: u.email, role: u.role });
+  } catch (e) { res.status(500).json({ error: e.code === 11000 ? "यह email पहले से है" : e.message }); }
+});
+app.get("/api/users", requireRole("super-admin", "admin"), async (req, res) => {
+  res.json(await User.find({}, "name email role brand createdAt").sort({ createdAt: -1 }));
+});
+
+// ---- Brands / Settings ----
+app.get("/api/brands", (req, res) => res.json(BRANDS));
+app.get("/api/settings", requireRole("super-admin", "admin"), async (req, res) => {
+  const out = {};
+  for (const id of Object.keys(BRANDS)) {
+    const c = brandCreds(id);
+    out[id] = { // tokens masked
+      fbPageId: c.fbPageId || "", fbToken: c.fbToken ? "••••set" : "", igUserId: c.igUserId || "",
+      ytRefreshToken: c.ytRefreshToken ? "••••set" : "", waPhoneId: c.waPhoneId || "", waRecipients: c.waRecipients,
+    };
+  }
+  res.json(out);
+});
+app.put("/api/settings/:brand", requireRole("super-admin", "admin"), async (req, res) => {
+  try {
+    if (!BRANDS[req.params.brand]) return res.status(400).json({ error: "invalid brand" });
+    const existing = (await Setting.findOne({ brand: req.params.brand }))?.creds || {};
+    const creds = { ...existing };
+    ["fbPageId", "fbToken", "igUserId", "ytRefreshToken", "waPhoneId", "waRecipients"].forEach((k) => {
+      if (req.body[k] !== undefined && req.body[k] !== "••••set") creds[k] = req.body[k];
+    });
+    await Setting.findOneAndUpdate({ brand: req.params.brand }, { creds }, { upsert: true });
+    await loadSettings();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- YouTube OAuth (UI से connect) ----
+app.get("/api/oauth/google", requireRole("super-admin", "admin"), (req, res) => {
+  try {
+    const { google } = require("googleapis");
+    const oauth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, `${PUBLIC_URL}/api/oauth/google/callback`);
+    const url = oauth.generateAuthUrl({ access_type: "offline", prompt: "consent", scope: ["https://www.googleapis.com/auth/youtube.upload"], state: req.query.brand });
+    res.json({ url });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get("/api/oauth/google/callback", async (req, res) => {
+  try {
+    const { google } = require("googleapis");
+    const oauth = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, `${PUBLIC_URL}/api/oauth/google/callback`);
+    const { tokens } = await oauth.getToken(req.query.code);
+    const brand = req.query.state;
+    if (tokens.refresh_token && BRANDS[brand]) {
+      const existing = (await Setting.findOne({ brand }))?.creds || {};
+      await Setting.findOneAndUpdate({ brand }, { creds: { ...existing, ytRefreshToken: tokens.refresh_token } }, { upsert: true });
+      await loadSettings();
+    }
+    res.send("<h2>YouTube connect हो गया ✅ — यह tab बंद कर दें।</h2>");
+  } catch (e) { res.status(500).send("OAuth error: " + e.message); }
+});
+
+// ---- Content ----
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { brand, type } = req.body;
+    if (!BRANDS[brand] || !TYPES.includes(type)) return res.status(400).json({ error: "invalid brand/type" });
+    const text = await generateText(brand, type);
+    const doc = await Content.create({ brand, type, text, status: "pending" });
+    doc.images = await generateImages(brand, doc._id, text, type);
+    await doc.save(); res.json(doc);
+  } catch (e) { log("ERROR", "/generate", { msg: e.message }); res.status(500).json({ error: e.message }); }
+});
+app.get("/api/content", async (req, res) => {
+  try { const q = {}; if (req.query.brand) q.brand = req.query.brand; if (req.query.status) q.status = req.query.status;
+    res.json(await Content.find(q).sort({ createdAt: -1 }).limit(50)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch("/api/content/:id", async (req, res) => {
+  try {
+    const doc = await Content.findById(req.params.id); if (!doc) return res.status(404).json({ error: "not found" });
+    if (typeof req.body.text === "string") doc.text = req.body.text;
+    if (req.body.platforms) doc.platforms = { ...doc.platforms, ...req.body.platforms };
+    if (typeof req.body.text === "string") doc.images = await generateImages(doc.brand, doc._id, doc.text, doc.type);
+    await doc.save(); res.json(doc);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post("/api/content/:id/video", async (req, res) => {
+  try {
+    const doc = await Content.findById(req.params.id); if (!doc) return res.status(404).json({ error: "not found" });
+    const mf = req.body.music ? path.join(MUSIC_DIR, path.basename(req.body.music)) : null;
+    if (mf && !fs.existsSync(mf)) return res.status(400).json({ error: "music not found" });
+    doc.video = await generateVideo(doc._id, mf); doc.music_used = req.body.music || null; doc.post_type = "video";
+    await doc.save(); res.json(doc);
+  } catch (e) { log("ERROR", "/video", { msg: e.message }); res.status(500).json({ error: e.message }); }
+});
+app.post("/api/content/:id/approve", requireRole("super-admin", "admin", "manager"), async (req, res) => {
+  try {
+    const doc = await Content.findById(req.params.id); if (!doc) return res.status(404).json({ error: "not found" });
+    if (doc.status !== "pending") return res.status(400).json({ error: `already ${doc.status}` });
+    const results = await publish(doc); const ok = results.filter((r) => r.ok).map((r) => r.platform);
+    doc.results = results; doc.channels = ok; doc.status = ok.length ? "sent" : "failed"; doc.sentAt = new Date();
+    await doc.save();
+    if (doc.status === "failed") notify("post_failed", `${BRANDS[doc.brand].name}: पोस्ट fail हुई`, doc.brand);
+    res.json(doc);
+  } catch (e) { log("ERROR", "/approve", { msg: e.message }); res.status(500).json({ error: e.message }); }
+});
+app.post("/api/content/:id/reject", async (req, res) => {
+  try { const doc = await Content.findByIdAndUpdate(req.params.id, { status: "rejected" }, { new: true }); if (!doc) return res.status(404).json({ error: "not found" }); res.json(doc); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- Music ----
+app.get("/api/music", (req, res) => res.json(fs.readdirSync(MUSIC_DIR).filter((f) => /\.(mp3|m4a|wav)$/i.test(f))));
+const musicUpload = multer({ storage: multer.diskStorage({ destination: MUSIC_DIR, filename: (req, f, cb) => cb(null, f.originalname) }), limits: { fileSize: 15 * 1024 * 1024 } });
+app.post("/api/music/upload", musicUpload.single("file"), (req, res) => req.file ? res.json({ ok: true, file: req.file.originalname }) : res.status(400).json({ error: "no file" }));
+
+// ---- Delivery ----
+const photoUpload = multer({ storage: multer.diskStorage({ destination: UPLOAD_DIR, filename: (req, f, cb) => cb(null, Date.now() + "_" + f.originalname.replace(/\s+/g, "_")) }), limits: { fileSize: 12 * 1024 * 1024 } });
+app.post("/api/delivery", photoUpload.single("photo"), async (req, res) => {
+  try {
+    const { brand, customerName, bikeName, offer, music } = req.body;
+    if (!BRANDS[brand]) return res.status(400).json({ error: "invalid brand" });
+    const doc = await Delivery.create({ brand, customerName, bikeName, offer, photo: req.file?.filename, status: "pending" });
+    await buildDeliverySlides(brand, doc._id, doc, req.file ? req.file.path : null);
+    let mf = null; if (music) { const m = path.join(MUSIC_DIR, path.basename(music)); if (fs.existsSync(m)) mf = m; }
+    doc.video = await generateDeliveryVideo(doc._id, mf); doc.music_used = mf ? path.basename(mf) : null;
+    doc.images = { square: `${PUBLIC_URL}/generated/${doc._id}_square.png`, landscape: `${PUBLIC_URL}/generated/${doc._id}_landscape.png` };
+    doc.text = await deliveryCaption(brand, doc); await doc.save();
+    notify("delivery", `${BRANDS[brand].name}: ${customerName || "ग्राहक"} की delivery video तैयार — review करें`, brand);
+    res.json(doc);
+  } catch (e) { log("ERROR", "/delivery", { msg: e.message }); res.status(500).json({ error: e.message }); }
+});
+
+// गाड़ी वाला आकर्षक विज्ञापन (photo + price + offer) → pending (Content में)
+app.post("/api/promo", photoUpload.single("photo"), async (req, res) => {
+  try {
+    const { brand, model: vmodel, price, downPayment, cashback, bg, vehicle } = req.body;
+    if (!BRANDS[brand]) return res.status(400).json({ error: "invalid brand" });
+    const features = (req.body.features || "").split(",").map((s) => s.trim()).filter(Boolean);
+    // गाड़ी की फोटो: या तो अभी upload हुई, या library से चुनी गई
+    let photoPath = req.file ? req.file.path : null;
+    if (!photoPath && vehicle) {
+      const vp = path.join(VEHICLE_DIR, brand, path.basename(vehicle));
+      if (fs.existsSync(vp)) photoPath = vp;
+    }
+    const o = { model: vmodel, price, downPayment, cashback, features, bg: bg || "light", photo: req.file?.filename || vehicle };
+    const initText = `${vmodel || ""} अब ${BRANDS[brand].place} पर! 📞 ${BRANDS[brand].phone}`;
+    const doc = await Content.create({ brand, type: "vigyapan", post_type: "photo", text: initText, status: "pending", promo: o });
+    doc.images = await generatePromoImages(brand, doc._id, o, photoPath);
+    const b = BRANDS[brand];
+    doc.text = `${vmodel || ""} अब ${b.place} पर!\nएक्स-शोरूम ₹${price || ""}` +
+      (downPayment ? ` • डाउन ₹${downPayment}` : "") + (cashback ? ` • कैशबैक ₹${cashback}` : "") +
+      `\n📞 ${b.phone}`;
+    await doc.save();
+    res.json(doc);
+  } catch (e) { log("ERROR", "/promo", { msg: e.message }); res.status(500).json({ error: e.message }); }
+});
+// गाड़ी library: एक बार upload, फिर dropdown से select
+const vehUpload = multer({ storage: multer.diskStorage({
+  destination: (req, f, cb) => { const d = path.join(VEHICLE_DIR, req.body.brand || "vp_honda"); fs.mkdirSync(d, { recursive: true }); cb(null, d); },
+  filename: (req, f, cb) => cb(null, f.originalname.replace(/\s+/g, "_")),
+}), limits: { fileSize: 12 * 1024 * 1024 } });
+app.get("/api/vehicles", (req, res) => {
+  const d = path.join(VEHICLE_DIR, req.query.brand || "vp_honda");
+  try { res.json(fs.readdirSync(d).filter((f) => /\.(png|jpg|jpeg|webp)$/i.test(f))); }
+  catch (_) { res.json([]); }
+});
+app.post("/api/vehicles/upload", vehUpload.single("photo"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "no file" });
+  res.json({ ok: true, file: req.file.originalname.replace(/\s+/g, "_") });
+});
+app.get("/api/deliveries", async (req, res) => {
+  try { const q = {}; if (req.query.brand) q.brand = req.query.brand; if (req.query.status) q.status = req.query.status;
+    res.json(await Delivery.find(q).sort({ createdAt: -1 }).limit(50)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post("/api/delivery/:id/approve", requireRole("super-admin", "admin", "manager"), async (req, res) => {
+  try {
+    const doc = await Delivery.findById(req.params.id); if (!doc) return res.status(404).json({ error: "not found" });
+    if (doc.status !== "pending") return res.status(400).json({ error: `already ${doc.status}` });
+    const results = await publish(doc); const ok = results.filter((r) => r.ok).map((r) => r.platform);
+    doc.results = results; doc.channels = ok; doc.status = ok.length ? "sent" : "failed"; doc.sentAt = new Date();
+    await doc.save();
+    if (doc.status === "failed") notify("post_failed", `${BRANDS[doc.brand].name}: delivery पोस्ट fail`, doc.brand);
+    res.json(doc);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post("/api/delivery/:id/reject", async (req, res) => {
+  try { const doc = await Delivery.findByIdAndUpdate(req.params.id, { status: "rejected" }, { new: true }); if (!doc) return res.status(404).json({ error: "not found" }); res.json(doc); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- Leads / CRM ----
+app.post("/api/lead", async (req, res) => { // PUBLIC — "Interested? Click here" form से
+  try {
+    const { brand, name, mobile, vehicleInterest, source } = req.body;
+    if (!mobile) return res.status(400).json({ error: "mobile चाहिए" });
+    const lead = await Lead.create({ brand, name, mobile, vehicleInterest, source: source || "post" });
+    notify("lead", `नया lead: ${name || mobile} (${vehicleInterest || "—"})`, brand);
+    res.json({ ok: true, id: lead._id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get("/api/leads", async (req, res) => {
+  try { const q = {}; if (req.query.brand) q.brand = req.query.brand; if (req.query.status) q.status = req.query.status;
+    res.json(await Lead.find(q).sort({ createdAt: -1 }).limit(200)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.patch("/api/leads/:id", async (req, res) => {
+  try { const u = {}; if (req.body.status) u.status = req.body.status; if (req.body.note !== undefined) u.note = req.body.note;
+    res.json(await Lead.findByIdAndUpdate(req.params.id, u, { new: true })); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- Analytics (हमारे DB से; platform "views" के लिए Insights API बाद में) ----
+app.get("/api/analytics", async (req, res) => {
+  try {
+    const brand = req.query.brand; const q = brand ? { brand } : {};
+    const since = new Date(Date.now() - 7 * 864e5);
+    const [contentSent, contentPending, deliveriesSent, deliveriesPending, leadsTotal, leadsNew] = await Promise.all([
+      Content.countDocuments({ ...q, status: "sent" }), Content.countDocuments({ ...q, status: "pending" }),
+      Delivery.countDocuments({ ...q, status: "sent" }), Delivery.countDocuments({ ...q, status: "pending" }),
+      Lead.countDocuments(q), Lead.countDocuments({ ...q, status: "new" }),
+    ]);
+    const leadsByVehicle = await Lead.aggregate([{ $match: q }, { $group: { _id: "$vehicleInterest", n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $limit: 8 }]);
+    const postsLast7 = await Content.aggregate([{ $match: { ...q, status: "sent", sentAt: { $gte: since } } }, { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$sentAt" } }, n: { $sum: 1 } } }, { $sort: { _id: 1 } }]);
+    res.json({ contentSent, contentPending, deliveriesSent, deliveriesPending, leadsTotal, leadsNew, leadsByVehicle, postsLast7, note: "Views/reach के असली आँकड़े platform Insights API से बाद में जुड़ेंगे।" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- Notifications ----
+app.get("/api/notifications", async (req, res) => {
+  const items = await Notification.find().sort({ createdAt: -1 }).limit(30);
+  res.json({ items, unread: await Notification.countDocuments({ read: false }) });
+});
+app.post("/api/notifications/read", async (req, res) => { await Notification.updateMany({ read: false }, { read: true }); res.json({ ok: true }); });
+
+// ---- WhatsApp auto chat-bot (webhook) ----
+function botReply(brandId, text) {
+  const b = BRANDS[brandId]; const t = (text || "").toLowerCase();
+  if (/price|कीमत|रेट|दाम|kitne|kitna/.test(t)) return `${b.name}: हमारे पास ${b.products.slice(0, 3).join(", ")} उपलब्ध हैं। कीमत व EMI के लिए 📞 ${b.phone}`;
+  if (/mileage|माइलेज|average|range/.test(t)) return `बढ़िया माइलेज/रेंज! पूरी जानकारी के लिए 📞 ${b.phone} या ${b.place} पधारें 🙏`;
+  if (/loan|emi|लोन|किस्त|finance|फाइनेंस/.test(t)) return `जी हाँ, आसान EMI/loan उपलब्ध है ✅ कागज़ात व ब्याज़ दर के लिए 📞 ${b.phone}`;
+  return `नमस्ते 🙏 ${b.name} में स्वागत है। आप पूछ सकते हैं: price / mileage / loan — या सीधे कॉल करें 📞 ${b.phone}`;
+}
+app.get("/api/whatsapp/webhook", (req, res) => { // Meta verification
+  if (req.query["hub.mode"] === "subscribe" && req.query["hub.verify_token"] === WA_VERIFY_TOKEN) return res.send(req.query["hub.challenge"]);
+  res.sendStatus(403);
+});
+app.post("/api/whatsapp/webhook", async (req, res) => {
+  res.sendStatus(200); // Meta को तुरंत 200
+  try {
+    const v = req.body?.entry?.[0]?.changes?.[0]?.value; const msg = v?.messages?.[0];
+    if (!msg) return;
+    const phoneId = v?.metadata?.phone_number_id;
+    const brandId = Object.keys(BRANDS).find((id) => brandCreds(id).waPhoneId === phoneId) || "vp_honda";
+    const reply = botReply(brandId, msg.text?.body);
+    log("INFO", "WA bot reply", { brandId, from: msg.from });
+    if (TEST_MODE || !process.env.WA_TOKEN) return;
+    await fetch(`${GRAPH}/${phoneId}/messages`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.WA_TOKEN}` }, body: JSON.stringify({ messaging_product: "whatsapp", to: msg.from, type: "text", text: { body: reply } }) });
+  } catch (e) { log("ERROR", "WA webhook", { msg: e.message }); }
+});
+
+// ===========================================================================
+// CRON — रोज़ generate→pending + festival auto-mode (auto-post नहीं!)
+// ===========================================================================
+async function genToPending(brand, type, festivalName) {
+  const text = await generateText(brand, type, festivalName);
+  const doc = await Content.create({ brand, type, text, status: "pending" });
+  doc.images = await generateImages(brand, doc._id, text, type); await doc.save();
+  log("INFO", "cron → pending", { brand, type, id: String(doc._id) });
+}
+if (ENABLE_CRON) {
+  cron.schedule(CRON_SCHEDULE, async () => {
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }); // YYYY-MM-DD
+    const fest = FESTIVALS.find((f) => f.date === today);
+    log("INFO", "Cron run", { today, festival: fest?.name || null });
+    for (const brand of Object.keys(BRANDS)) {
+      try {
+        if (fest) { await genToPending(brand, "festival", fest.name); }
+        else { await genToPending(brand, "suvichar"); }
+      } catch (e) { log("ERROR", "cron gen failed", { brand, msg: e.message }); }
+    }
+    if (fest) await notify("festival", `${fest.name}: तीनों brands की शुभकामना पोस्ट pending में — review करें`, null);
+  }, { timezone: "Asia/Kolkata" });
+}
+
+// ===========================================================================
+// Boot — admin seed + settings load
+// ===========================================================================
+(async () => {
+  try { await mongoose.connect(MONGO_URI); log("INFO", "MongoDB connected"); }
+  catch (e) { log("ERROR", "MongoDB failed", { msg: e.message }); process.exit(1); }
+  await loadSettings();
+  if ((await User.countDocuments()) === 0) {
+    const email = (process.env.SEED_ADMIN_EMAIL || "admin@vphonda.com").toLowerCase();
+    const pass = process.env.SEED_ADMIN_PASSWORD || "vphonda@123";
+    await User.create({ name: "Admin", email, passwordHash: await bcrypt.hash(pass, 10), role: "super-admin" });
+    log("INFO", `Seed admin बनाया: ${email} (password बदल लें!)`);
+  }
+  app.listen(PORT, () => log("INFO", `AutoSuVichar backend on ${PUBLIC_URL} (TEST_MODE=${TEST_MODE})`));
+})();

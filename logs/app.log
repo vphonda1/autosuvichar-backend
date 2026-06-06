@@ -1,0 +1,58 @@
+[2026-06-06T07:29:44.744Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.vp-honda.frytsjm.mongodb.net"}
+[2026-06-06T07:31:03.815Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.vp-honda.frytsjm.mongodb.net"}
+[2026-06-06T07:46:12.641Z] ERROR MongoDB failed {"msg":"connect ECONNREFUSED 127.0.0.1:27017"}
+[2026-06-06T07:48:41.266Z] ERROR MongoDB failed {"msg":"connect ECONNREFUSED 127.0.0.1:27017"}
+[2026-06-06T07:50:00.489Z] ERROR MongoDB failed {"msg":"connect ECONNREFUSED 127.0.0.1:27017"}
+[2026-06-06T07:51:54.934Z] ERROR MongoDB failed {"msg":"connect ECONNREFUSED 127.0.0.1:27017"}
+[2026-06-06T07:53:07.868Z] ERROR MongoDB failed {"msg":"connect ECONNREFUSED 127.0.0.1:27017"}
+[2026-06-06T07:56:11.751Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T07:58:01.732Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T08:01:39.040Z] ERROR MongoDB failed {"msg":"retryWrites must be either \"true\" or \"false\""}
+[2026-06-06T08:02:36.621Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T08:04:36.145Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T08:21:59.407Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T08:23:10.308Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T08:28:22.844Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T08:34:54.759Z] INFO MongoDB connected
+[2026-06-06T08:34:55.811Z] INFO Seed admin बनाया: autosuvichar (password बदल लें!)
+[2026-06-06T08:34:55.826Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T09:14:43.955Z] ERROR /delivery {"msg":"video disabled"}
+[2026-06-06T09:19:56.731Z] ERROR /delivery {"msg":"video disabled"}
+[2026-06-06T09:21:09.396Z] INFO notify {"type":"post_failed","brand":"minimetro"}
+[2026-06-06T09:23:11.542Z] ERROR /delivery {"msg":"video disabled"}
+[2026-06-06T10:19:43.189Z] INFO MongoDB connected
+[2026-06-06T10:19:44.262Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T10:20:52.919Z] INFO [TEST] would post → fb {"brand":"vp_honda"}
+[2026-06-06T10:20:52.922Z] INFO [TEST] would post → ig {"brand":"vp_honda"}
+[2026-06-06T10:20:52.924Z] INFO [TEST] would post → yt {"brand":"vp_honda"}
+[2026-06-06T10:20:52.926Z] INFO [TEST] would post → wa {"brand":"vp_honda"}
+[2026-06-06T10:21:03.151Z] INFO [TEST] would post → fb {"brand":"vp_honda"}
+[2026-06-06T10:21:03.153Z] INFO [TEST] would post → ig {"brand":"vp_honda"}
+[2026-06-06T10:21:03.160Z] INFO [TEST] would post → yt {"brand":"vp_honda"}
+[2026-06-06T10:21:03.163Z] INFO [TEST] would post → wa {"brand":"vp_honda"}
+[2026-06-06T10:21:25.785Z] ERROR /video {"msg":"video disabled"}
+[2026-06-06T10:36:49.503Z] INFO MongoDB connected
+[2026-06-06T10:36:50.213Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T10:53:56.540Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T10:54:16.413Z] ERROR MongoDB failed {"msg":"querySrv ECONNREFUSED _mongodb._tcp.autosuvichar.wxsvxto.mongodb.net"}
+[2026-06-06T10:55:30.797Z] INFO MongoDB connected
+[2026-06-06T10:55:31.444Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T11:14:37.495Z] INFO MongoDB connected
+[2026-06-06T11:14:38.616Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T11:15:44.363Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:21:28.777Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:22:00.131Z] INFO MongoDB connected
+[2026-06-06T11:22:01.252Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T11:23:27.838Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:23:29.182Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:23:29.404Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:23:29.629Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:23:29.845Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:23:30.099Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:23:30.261Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:34:10.701Z] ERROR /promo {"msg":"Content validation failed: text: Path `text` is required."}
+[2026-06-06T11:36:10.331Z] INFO MongoDB connected
+[2026-06-06T11:36:10.994Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
+[2026-06-06T12:38:44.691Z] ERROR /delivery {"msg":"video disabled"}
+[2026-06-06T15:49:39.044Z] INFO MongoDB connected
+[2026-06-06T15:49:40.320Z] INFO AutoSuVichar backend on http://localhost:5000 (TEST_MODE=true)
