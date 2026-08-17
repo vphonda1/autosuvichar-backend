@@ -6888,5 +6888,10 @@ ${errMsg}
     const all = await User.find({}, { email: 1, role: 1, _id: 0 }).lean();
     log("INFO", `मौजूद logins (${all.length}): ` + all.map((u) => `${u.email}[${u.role}]`).join(", "));
   } catch (_) {}
+  require("./growth-engine")(app, {
+  mongoose, Content, Delivery, Lead, Setting, Notification, ActivityLog,
+  brandCreds, loadSettings, log, requireRole, publish,
+  BRANDS, GRAPH, PUBLIC_URL, TEST_MODE, OUT_DIR,
+});
   app.listen(PORT, () => log("INFO", `AutoSuVichar backend on ${PUBLIC_URL} (TEST_MODE=${TEST_MODE})`));
 })();
