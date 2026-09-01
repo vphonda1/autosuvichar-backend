@@ -7073,6 +7073,12 @@ ${errMsg}
   } catch (e) {
     log("ERROR", "growth-engine चालू नहीं हुआ (बाक़ी app चलता रहेगा)", { msg: e.message });
   }
-
+// ── AI Marketing Orchestrator (2.0) ──────────────────────────
+require("./orchestrator.js")(app, {
+  log, BRANDS, TYPES, TYPE_LABEL, Content, Vehicle, Delivery, Lead, Notification,
+  parseCommandIntent, vehicleContext, generateText, generateImages, cleanAIText,
+  adaptToPlatforms, qualityCheckContent, makeVoiceScript,
+  getAutomationSettings, checkAndCountUsage, activity, notify, safePublish,
+});
   app.listen(PORT, () => log("INFO", `AutoSuVichar backend on ${PUBLIC_URL} (TEST_MODE=${TEST_MODE})`));
 })();
